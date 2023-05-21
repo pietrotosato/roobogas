@@ -2,6 +2,7 @@
 #include "mbed.h"
 #include <string.h>
 #include "mcp342x.h"
+#include "MCP4716.h"
 
 #define USB_BUFF_SIZE 32
 
@@ -14,11 +15,11 @@
 int current_DAC[2] = {0,0};
 const float RFB[2] = {1000000, 1000};
 static uint8_t sw_set[2] = {RFB1k,RFB1M};
-MCP342X::PgaSetting pgaSetting[4] = 
-{ MCP342X::PGA_1X, MCP342X::PGA_1X, MCP342X::PGA_1X, MCP342X::PGA_1X };
+MCP342X::PgaSetting pgaSetting[4] = { MCP342X::PGA_1X, MCP342X::PGA_1X, MCP342X::PGA_1X, MCP342X::PGA_1X };
 
 static BufferedSerial serial_port(USBTX, USBRX, 115200);
 I2C i2c(I2C_SDA, I2C_SCL);
+
 
 // gpio configuration
 static AnalogIn vh1(A4);
@@ -58,6 +59,7 @@ static void SW_Set(uint8_t _ch, uint8_t _set);
 void readSignals_thdFn(void) {
     
     MCP342X mcp342x(&i2c, MCP342X::SLAVE_ADDRESS_6BH);
+    
     const uint8_t gain[4] = {1,2,4,8};
 
     // Data buffer.
@@ -99,6 +101,14 @@ void readSignals_thdFn(void) {
 
 
 void updateDac_thdFn(void) {
+
+    MCP4716 dac1(MCP4716::MCP4716A3_ADDR, &i2c);
+    MCP4716 dac2(MCP4716::MCP4716A1_ADDR, &i2c);
+
+    // TODO fix here!
+    dac1.setValue(300);
+    dac2.setValue(600);
+
      while (true) {
         osEvent evt = updatedac_mb.get();
         if (evt.status == osEventMail) {
@@ -140,6 +150,7 @@ int main(void)
 
     ThisThread::sleep_for(1s);
 
+
     // read serial USB port
     char bufferIn[USB_BUFF_SIZE];
 
@@ -180,7 +191,7 @@ static int16_t getAdcData(MCP342X *mcp3428, MCP342X::AdcChannel ch, MCP342X::Pga
     // polling data
     MCP342X::Data data;
     do {
-        ThisThread::sleep_for(20ms);
+        ThisThread::sleep_for(100ms);
         mcp3428->getData(&data);
     } while(data.st == MCP342X::DATA_NOT_UPDATED);
     return data.value;
