@@ -113,7 +113,7 @@ void readSignals_thdFn(void) {
         }
 
         report_mb.put(mail);
-        ThisThread::sleep_for(1s);
+        ThisThread::sleep_for(500ms);
     }
 }
 
@@ -121,33 +121,61 @@ void readSignals_thdFn(void) {
 
 void updateDac_thdFn(void) {
 
-    static MCP4716 dac1(MCP4716::MCP4716A3_ADDR, &i2c);
-    static MCP4716 dac2(MCP4716::MCP4716A1_ADDR, &i2c);
-    static uint16_t setpoint[2];
+    MCP4716 dac[2] = {
+        MCP4716(MCP4716::MCP4716A3_ADDR, &i2c), 
+        MCP4716(MCP4716::MCP4716A1_ADDR, &i2c)
+    };
+
+    const int iterIncrement = 3;
+    static int setpoint[2] = {-1,-1};
+    current_DAC[CH1] = -1;
+    current_DAC[CH2] = -1;    
+
+    while (current_DAC[CH1] < 0) {current_DAC[CH1] = dac[CH1].getValue();}
+    while (current_DAC[CH2] < 0) {current_DAC[CH2] = dac[CH2].getValue();}
+
+    setpoint[CH1] = current_DAC[CH1];
+    setpoint[CH2] = current_DAC[CH2];
+    
+    // printf("Init dac driver with values: %d, %d\n", current_DAC[CH1], current_DAC[CH2]);
+    printf("Init dac driver with values: %d, %d\n", current_DAC[CH1], current_DAC[CH2]);
 
     while (true) {
-        osEvent evt = updatedac_mb.get();
+        osEvent evt = updatedac_mb.get(50);
         if (evt.status == osEventMail) {
             setpoint_mail_t *mail = (setpoint_mail_t *)evt.value.p;
-            printf("update DAC: %d, %d \n\r", mail->setpoint[CH1], mail->setpoint[CH2]);
+            // printf("update DAC: %d, %d \n\r", mail->setpoint[CH1], mail->setpoint[CH2]);
 
             // check values
-            if ( (mail->setpoint[CH1] != -1) && (mail->setpoint[CH1] != setpoint[CH1]) ) {
+            if (mail->setpoint[CH1] != -1) {
                 setpoint[CH1] = mail->setpoint[CH1];
             }
-            if ( (mail->setpoint[CH2] != -1) && (mail->setpoint[CH2] != setpoint[CH2]) ) {
+            if (mail->setpoint[CH2] != -1) {
                 setpoint[CH2] = mail->setpoint[CH2];
             }
 
             updatedac_mb.free(mail);
-        } 
-        
-        dac1.setValue(setpoint[CH1]);
-        current_DAC[CH1] = setpoint[CH1];
+        }
 
-        dac2.setValue(setpoint[CH2]);
-        current_DAC[CH2] = setpoint[CH2];
-        
+        for (uint8_t ch=CH1; ch<=CH2; ch++) {
+            if (abs(current_DAC[ch] - setpoint[ch]) == 0) {
+                // skip it
+            } else if (abs(current_DAC[ch] - setpoint[ch]) < iterIncrement) {
+                // round to the setpoint
+                if ( dac[ch].setValue(setpoint[ch]) == 0 )
+                    current_DAC[ch] = setpoint[ch];
+            } else {
+                // move it
+                int temp = current_DAC[ch];
+                ((current_DAC[ch] - setpoint[ch]) < 0)
+                    ? (temp += iterIncrement)
+                    : (temp -= iterIncrement);
+
+                if ( dac[ch].setValue(temp) == 0 )
+                    current_DAC[ch] = temp;
+            }
+        }
+                
         ThisThread::sleep_for(50ms);
     }
 }
@@ -174,7 +202,6 @@ void pollutionCheck_thdFn(void) {
             pollutionCheck_mb.free(mail);
         } 
         
-        
         ThisThread::sleep_for(500ms);
     }
 }
@@ -194,8 +221,8 @@ int main(void)
     i2c.frequency(400);
 
     // starting threads
-    readSignals_thd.start(callback(readSignals_thdFn));
     updateDAC_thd.start(callback(updateDac_thdFn));
+    readSignals_thd.start(callback(readSignals_thdFn));
     pollutionCheck_thd.start(callback(pollutionCheck_thdFn));
 
     ThisThread::sleep_for(200ms);
@@ -210,8 +237,8 @@ int main(void)
         osEvent evt = report_mb.get();
         if (evt.status == osEventMail) {
             report_mail_t *r = (report_mail_t *)evt.value.p;
-            printf("ch1: %.3f V / %.1f Ohm ->%.1f kOhm\t", r->heater_voltage[CH1], r->heater_resistance[CH1], r->sensor_resistance[CH1]/1000);
-            printf("ch2: %.3f V / %.1f Ohm ->%.1f kOhm\t", r->heater_voltage[CH2], r->heater_resistance[CH2], r->sensor_resistance[CH2]/1000);
+            printf("ch1: %.3f V / %.1f Ohm >> %.1f kOhm\t", r->heater_voltage[CH1], r->heater_resistance[CH1], r->sensor_resistance[CH1]/1000);
+            printf("ch2: %.3f V / %.1f Ohm >> %.1f kOhm\t", r->heater_voltage[CH2], r->heater_resistance[CH2], r->sensor_resistance[CH2]/1000);
             printf("[%d,%d,%d,%d]\t", r->dataraw[0],r->dataraw[1],r->dataraw[2],r->dataraw[3]);
             printf("[%d,%d]", current_DAC[CH1],current_DAC[CH2]);
             
@@ -245,26 +272,20 @@ static void processCmd(char *rx) {
     switch (rx[0]) {
         case 's':
         {
-            if (rx[1] == '1') // setpoint 1
-			{
+            if (rx[1] == '1') { // setpoint CH1
 				int val;
 				sscanf((const char *)&rx[3], (const char *)"%d\n", &val);
-				if ((val<1024) && val != (current_DAC[CH1]))
-				{
-                    // send command to thread
+				if ((val<1024) && val != (current_DAC[CH1])) { // send command to thread
                     setpoint_mail_t *mail = updatedac_mb.try_alloc();
                     mail->setpoint[CH1] = val&0x3FF;
                     mail->setpoint[CH2] = -1;
                     updatedac_mb.put(mail);
 				}
 			}
-			if (rx[1] == '2') // setpoint 2
-			{
+			if (rx[1] == '2') { // setpoint CH2
 				int val;
 				sscanf((const char *)&rx[3], (const char *)"%d\n", &val);
-				if ((val<1024) && val != (current_DAC[CH2]))
-				{
-                    // send command to thread
+				if ((val<1024) && val != (current_DAC[CH2])) { // send command to thread
 					setpoint_mail_t *mail = updatedac_mb.try_alloc();
                     mail->setpoint[CH1] = -1;
                     mail->setpoint[CH2] = val&0x3FF;
@@ -272,6 +293,29 @@ static void processCmd(char *rx) {
 				}
 			}
 			break;
+        }
+
+        case 'r':
+        {
+            if (rx[1] == 's' && rx[2] == 't') {
+                NVIC_SystemReset();
+            }
+            if (rx[1] == '1') { // R channel 1
+				if (rx[2] == '+') {
+					SW_Set(CH1, RFB1M);
+				}
+				else if (rx[2] == '-') {
+					SW_Set(CH1, RFB1k);
+				}
+			}
+			if (rx[1] == '2') { // R channel 2
+				if (rx[2] == '+') {
+					SW_Set(CH2, RFB1M);
+				}
+				else if (rx[2] == '-') {
+					SW_Set(CH2, RFB1k);
+				}
+			}
         }
     }
 }
@@ -301,15 +345,4 @@ static void SW_Set(uint8_t _ch, uint8_t _set)
 		sw2.write(_set);
 		sw_set[CH2] = _set;
 	}
-}
-
-void update_DAC(int dac, int* arg_setpoint) {
-    if (dac>CH2 || dac<CH1) return;
-    const int setpoint = *arg_setpoint;
-    if (current_DAC[dac] != setpoint) {
-        printf("update ch %d to %d\n", current_DAC[dac], setpoint);
-        current_DAC[dac] += 5;
-    } else {
-        return;
-    }
 }
